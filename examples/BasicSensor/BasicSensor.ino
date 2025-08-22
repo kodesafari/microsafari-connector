@@ -1,19 +1,20 @@
 /*!
  * @file BasicSensor.ino
  * @brief Basic sensor data transmission example for MicroSafari ESP32 Library
- * 
+ *
  * This example demonstrates how to:
  * - Connect to WiFi and MicroSafari platform
  * - Send simulated sensor data (temperature, humidity, soil moisture, light)
  * - Handle response from the platform
  * - Implement periodic data transmission
- * 
+ *
  * @version 1.0.0
  * @date 2025-08-22
  * @author MicroSafari Team
  */
 
 #include <MicroSafari.h>
+#include <HTTPClient.h>
 
 // WiFi credentials - CHANGE THESE TO YOUR NETWORK
 const char* WIFI_SSID = "your_wifi_ssid";
@@ -25,7 +26,7 @@ const char* PLATFORM_URL = "https://your-microsafari-instance.com";
 const char* DEVICE_NAME = "ESP32-Farm-Sensor-01";
 
 // Sensor reading interval (in milliseconds)
-const unsigned long SENSOR_INTERVAL = 30000; // Send data every 30 seconds
+const unsigned long SENSOR_INTERVAL = 5000; // Send data every 5 seconds (was 30 seconds)
 
 // Create MicroSafari instance
 MicroSafari microSafari;
@@ -36,17 +37,18 @@ void setup() {
     while (!Serial) {
         delay(10);
     }
-    
+
     Serial.println();
     Serial.println("====================================");
     Serial.println("MicroSafari Basic Sensor Data Demo");
     Serial.println("====================================");
-    
+
     // Enable debug output
     microSafari.setDebug(true);
-    
+
     // Initialize MicroSafari library
     Serial.println("Initializing MicroSafari library...");
+    Serial.printf("Config: SSID=%s, API_KEY=%s, URL=%s, DEVICE=%s\n", WIFI_SSID, API_KEY, PLATFORM_URL, DEVICE_NAME);
     if (!microSafari.begin(WIFI_SSID, WIFI_PASSWORD, API_KEY, PLATFORM_URL, DEVICE_NAME)) {
         Serial.println("❌ Failed to initialize MicroSafari library!");
         Serial.println("Please check your configuration and restart.");
@@ -54,9 +56,9 @@ void setup() {
             delay(1000);
         }
     }
-    
+
     Serial.println("✅ Library initialized successfully!");
-    
+
     // Connect to WiFi
     Serial.println("Connecting to WiFi...");
     if (!microSafari.connectWiFi()) {
@@ -66,9 +68,34 @@ void setup() {
             delay(1000);
         }
     }
-    
+
     Serial.println("✅ WiFi connected successfully!");
-    
+
+    // Add network diagnostics
+    Serial.println("🔍 Network Diagnostics:");
+    Serial.printf("   📍 Local IP: %s\n", WiFi.localIP().toString().c_str());
+    Serial.printf("   🚪 Gateway: %s\n", WiFi.gatewayIP().toString().c_str());
+    Serial.printf("   🌐 DNS: %s\n", WiFi.dnsIP().toString().c_str());
+    Serial.printf("   📶 Signal: %d dBm\n", WiFi.RSSI());
+
+    // Test basic connectivity
+    Serial.println("🔗 Testing basic connectivity...");
+    HTTPClient testClient;
+    testClient.begin("http://192.168.18.197:3000");
+    testClient.setTimeout(5000);
+    int testCode = testClient.GET();
+    String testResponse = testClient.getString();
+    testClient.end();
+
+    Serial.printf("   Server response code: %d\n", testCode);
+    if (testCode > 0) {
+        Serial.println("   ✅ Server is reachable!");
+    } else {
+        Serial.println("   ❌ Cannot reach server");
+        Serial.println("   💡 Check if server is running and accessible");
+    }
+    Serial.println();
+
     // Test platform connection
     Serial.println("Testing platform connection...");
     if (microSafari.testConnection()) {
@@ -87,7 +114,7 @@ void setup() {
 void loop() {
     // Call the library's loop function
     microSafari.loop();
-    
+
     // Send sensor data at regular intervals
     static unsigned long lastSensorReading = 0;
     if (millis() - lastSensorReading >= SENSOR_INTERVAL) {
@@ -98,7 +125,7 @@ void loop() {
         }
         lastSensorReading = millis();
     }
-    
+
     delay(1000);
 }
 
@@ -107,23 +134,23 @@ void loop() {
  */
 void sendSensorData() {
     Serial.println("📡 Reading sensors and sending data...");
-    
+
     // Simulate sensor readings (replace with actual sensor code)
     float temperature = readTemperatureSensor();
     float humidity = readHumiditySensor();
     float soilMoisture = readSoilMoistureSensor();
     float lightLevel = readLightSensor();
-    
+
     // Display readings
     Serial.println("📊 Sensor Readings:");
     Serial.printf("   🌡️  Temperature: %.2f°C\n", temperature);
     Serial.printf("   💧 Humidity: %.2f%%\n", humidity);
     Serial.printf("   🌱 Soil Moisture: %.2f%%\n", soilMoisture);
     Serial.printf("   ☀️  Light Level: %.2f lux\n", lightLevel);
-    
+
     // Send data using the convenient method
     MicroSafariResponse response = microSafari.sendSensorData(temperature, humidity, soilMoisture, lightLevel);
-    
+
     // Handle response
     if (response.success) {
         Serial.println("✅ Data sent successfully!");
@@ -133,14 +160,14 @@ void sendSensorData() {
         Serial.println("❌ Failed to send data!");
         Serial.printf("   🚨 Error: %s\n", response.errorMessage.c_str());
         Serial.printf("   🔗 HTTP Code: %d\n", response.httpCode);
-        
+
         if (response.httpCode == 401) {
             Serial.println("   💡 Tip: Check your API key in the MicroSafari dashboard");
         } else if (response.httpCode == 503) {
             Serial.println("   💡 Tip: Platform may be in development mode");
         }
     }
-    
+
     Serial.println();
 }
 
