@@ -1,0 +1,53 @@
+#######################################
+# Syntax Coloring Map For MicroSafari
+#######################################
+
+#######################################
+# Datatypes (KEYWORD1)
+#######################################
+
+MicroSafari	KEYWORD1
+MicroSafariStatus	KEYWORD1
+MicroSafariResponse	KEYWORD1
+
+#######################################
+# Methods and Functions (KEYWORD2)
+#######################################
+
+begin	KEYWORD2
+connectWiFi	KEYWORD2
+isWiFiConnected	KEYWORD2
+testConnection	KEYWORD2
+sendSensorData	KEYWORD2
+sendRawData	KEYWORD2
+getStatus	KEYWORD2
+getStatusString	KEYWORD2
+getWiFiSignalStrength	KEYWORD2
+setDebug	KEYWORD2
+setConnectionTimeout	KEYWORD2
+setRetryConfig	KEYWORD2
+setHeartbeatInterval	KEYWORD2
+forceHeartbeat	KEYWORD2
+getLastHeartbeat	KEYWORD2
+isPlatformActive	KEYWORD2
+setAutoReconnect	KEYWORD2
+setMaxConsecutiveFailures	KEYWORD2
+getConnectionDiagnostics	KEYWORD2
+getLastError	KEYWORD2
+clearErrors	KEYWORD2
+runConnectivityTest	KEYWORD2
+getDetailedStatus	KEYWORD2
+disconnect	KEYWORD2
+loop	KEYWORD2
+getMacAddress	KEYWORD2
+getIPAddress	KEYWORD2
+
+#######################################
+# Constants (LITERAL1)
+#######################################
+
+MICROSAFARI_DISCONNECTED	LITERAL1
+MICROSAFARI_WIFI_CONNECTING	LITERAL1
+MICROSAFARI_WIFI_CONNECTED	LITERAL1
+MICROSAFARI_PLATFORM_CONNECTED	LITERAL1
+MICROSAFARI_ERROR	LITERAL1
