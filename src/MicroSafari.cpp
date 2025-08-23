@@ -1,306 +1,931 @@
 /*!
  * @file MicroSafari.cpp
- * @brief MicroSafari ESP32 Library - Implementation file
- *
- * This library provides easy connectivity to the MicroSafari IoT platform
- * for ESP32 devices, handling WiFi connection, data transmission, and
- * platform communication.
- *
+ * @brief Implementation of MicroSafari ESP32 Arduino Library
  * @version 1.0.0
  * @date 2025-08-22
- * @author MicroSafari Team
  */
 
 #include "MicroSafari.h"
 
-// Constructor
+/**
+ * @brief Constructor
+ */
 MicroSafari::MicroSafari() {
-    _debugEnabled = false;
-    _initialized = false;
+    _status = MICROSAFARI_DISCONNECTED;
+    _lastConnectionAttempt = 0;
+    _connectionTimeout = 30000; // 30 seconds default
+    _maxRetries = 3; // Default retry count
+    _retryDelay = 2000; // 2 seconds between retries
+    _lastHeartbeat = 0;
+    _heartbeatInterval = 300000; // 5 minutes default
+    _consecutiveFailures = 0;
+    _maxConsecutiveFailures = 5;
+    _lastErrorTime = 0;
+    _lastErrorMessage = "";
+    _autoReconnect = true;
+    _debug = false;
+    _commandCallback = nullptr;
 }
 
-// Destructor
+/**
+ * @brief Destructor
+ */
 MicroSafari::~MicroSafari() {
-    if (_initialized) {
-        WiFi.disconnect(true);
+    disconnect();
+}
+
+/**
+ * @brief Internal debug print method
+ */
+void MicroSafari::debugPrint(const String& message) {
+    if (_debug) {
+        Serial.print("[MicroSafari] ");
+        Serial.println(message);
     }
 }
 
-bool MicroSafari::begin(const char* wifiSSID, const char* wifiPassword, const char* apiKey, const char* platformURL, const char* deviceName) {
-    debugPrintln("MicroSafari::begin() - Starting initialization...");
-
-    // Store configuration
-    _wifiSSID = String(wifiSSID);
-    _wifiPassword = String(wifiPassword);
-    _apiKey = String(apiKey);
-    _platformURL = String(platformURL);
-    _deviceName = String(deviceName);
-
-    // Validate required parameters
-    if (_wifiSSID.length() == 0 || _wifiPassword.length() == 0 || _apiKey.length() == 0 || _platformURL.length() == 0) {
-        debugPrintln("MicroSafari::begin() - ERROR: Missing required configuration parameters");
+/**
+ * @brief Initialize the library
+ */
+bool MicroSafari::begin(const String& ssid, 
+                        const String& password, 
+                        const String& apiKey,
+                        const String& platformUrl,
+                        const String& deviceName) {
+    debugPrint("Initializing MicroSafari library...");
+    
+    // Validate parameters
+    if (ssid.isEmpty() || password.isEmpty() || apiKey.isEmpty()) {
+        debugPrint("ERROR: SSID, password, and API key cannot be empty");
         return false;
     }
-
+    
+    if (platformUrl.isEmpty()) {
+        debugPrint("ERROR: Platform URL cannot be empty");
+        return false;
+    }
+    
+    // Store configuration
+    _ssid = ssid;
+    _password = password;
+    _apiKey = apiKey;
+    _platformUrl = platformUrl;
+    _deviceName = deviceName.isEmpty() ? "ESP32-Device" : deviceName;
+    
     // Initialize WiFi
     WiFi.mode(WIFI_STA);
-    WiFi.setAutoReconnect(true);
-    WiFi.persistent(true);
-
-    debugPrintln("MicroSafari::begin() - Configuration stored successfully");
-    debugPrintln("  SSID: " + _wifiSSID);
-    debugPrintln("  API Key: " + _apiKey.substring(0, 8) + "...");
-    debugPrintln("  Platform URL: " + _platformURL);
-    debugPrintln("  Device Name: " + _deviceName);
-
-    _initialized = true;
+    WiFi.setHostname(_deviceName.c_str());
+    
+    debugPrint("Configuration stored successfully");
+    debugPrint("Device name: " + _deviceName);
+    debugPrint("Platform URL: " + _platformUrl);
+    
     return true;
 }
 
-void MicroSafari::setDebug(bool enabled) {
-    _debugEnabled = enabled;
-    debugPrintln("Debug output " + String(enabled ? "enabled" : "disabled"));
-}
-
-bool MicroSafari::connectWiFi() {
-    if (!_initialized) {
-        debugPrintln("MicroSafari::connectWiFi() - ERROR: Library not initialized");
-        return false;
-    }
-
-    debugPrintln("MicroSafari::connectWiFi() - Connecting to: " + _wifiSSID);
-
-    // Disconnect if already connected
-    if (WiFi.status() == WL_CONNECTED) {
-        WiFi.disconnect();
-        delay(100);
-    }
-
-    // Start connection
-    WiFi.begin(_wifiSSID.c_str(), _wifiPassword.c_str());
-
-    // Wait for connection (timeout after 30 seconds)
-    int attempts = 0;
-    const int maxAttempts = 30;
-
-    while (WiFi.status() != WL_CONNECTED && attempts < maxAttempts) {
-        delay(1000);
-        attempts++;
-        debugPrint(".");
-
-        if (attempts % 10 == 0) {
-            debugPrintln("");
-            debugPrintln("Still connecting... (" + String(attempts) + "/" + String(maxAttempts) + ")");
-        }
+/**
+ * @brief Connect to WiFi network
+ */
+bool MicroSafari::connectWiFi(unsigned long timeout) {
+    debugPrint("Attempting WiFi connection...");
+    debugPrint("SSID: " + _ssid);
+    
+    _status = MICROSAFARI_WIFI_CONNECTING;
+    _lastConnectionAttempt = millis();
+    
+    // Start WiFi connection
+    WiFi.begin(_ssid.c_str(), _password.c_str());
+    
+    unsigned long startTime = millis();
+    
+    // Wait for connection with timeout
+    while (WiFi.status() != WL_CONNECTED && (millis() - startTime) < timeout) {
+        delay(500);
+        debugPrint("Connecting...");
     }
     
     if (WiFi.status() == WL_CONNECTED) {
-        debugPrintln("");
-        debugPrintln("WiFi connected successfully!");
-        debugPrintln("  IP Address: " + WiFi.localIP().toString());
-        debugPrintln("  Signal Strength: " + String(WiFi.RSSI()) + " dBm");
+        _status = MICROSAFARI_WIFI_CONNECTED;
+        debugPrint("WiFi connected successfully!");
+        debugPrint("IP address: " + WiFi.localIP().toString());
+        debugPrint("Signal strength: " + String(WiFi.RSSI()) + " dBm");
+        
+        // Reset failure counter on successful connection
+        if (_consecutiveFailures > 0) {
+            debugPrint("WiFi reconnected, resetting failure counter");
+            _consecutiveFailures = 0;
+        }
+        
         return true;
     } else {
-        debugPrintln("");
-        debugPrintln("WiFi connection failed after " + String(maxAttempts) + " seconds");
+        _status = MICROSAFARI_ERROR;
+        String errorMsg = "WiFi connection failed (status: " + String(WiFi.status()) + ")";
+        debugPrint(errorMsg);
+        handleConnectionFailure(errorMsg);
         return false;
     }
 }
 
+/**
+ * @brief Check WiFi connection status
+ */
 bool MicroSafari::isWiFiConnected() {
     return WiFi.status() == WL_CONNECTED;
 }
 
+/**
+ * @brief Test connection to MicroSafari platform
+ */
 bool MicroSafari::testConnection() {
     if (!isWiFiConnected()) {
-        debugPrintln("MicroSafari::testConnection() - ERROR: WiFi not connected");
+        debugPrint("Cannot test connection - WiFi not connected");
         return false;
     }
     
-    debugPrintln("MicroSafari::testConnection() - Testing platform connection...");
-    debugPrintln("Platform URL: " + _platformURL);
-    debugPrintln("Local IP: " + getLocalIP());
-    debugPrintln("Gateway: " + WiFi.gatewayIP().toString());
-    debugPrintln("DNS: " + WiFi.dnsIP().toString());
-
-    // Test the API endpoint directly
-    HTTPClient httpClient;
-    String apiUrl = _platformURL + "/api/ingest";
-    debugPrintln("Testing API endpoint: " + apiUrl);
-
-    httpClient.begin(apiUrl);
-    httpClient.addHeader("User-Agent", "MicroSafari-ESP32/1.0.0");
-    httpClient.addHeader("Connection", "close");
-    httpClient.addHeader("x-api-key", _apiKey);
-    httpClient.addHeader("Content-Type", "application/json");
-    httpClient.setTimeout(10000);
-    httpClient.setReuse(false);
-    httpClient.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS); // Follow redirects
-
-    // Try a small test payload
-    String testPayload = "{\"payload\":{\"test\":true,\"timestamp\":" + String(millis()) + ",\"device\":\"" + _deviceName + "\"}}";
-    debugPrintln("JSON payload: " + testPayload);
-    debugPrintln("JSON validation successful");
-    debugPrintln("Performing HTTP POST to: /api/ingest");
-
-    int httpCode = httpClient.POST(testPayload);
-    String response = httpClient.getString();
-    httpClient.end();
-
-    debugPrintln("HTTP response code: " + String(httpCode));
-    debugPrintln("HTTP response body: " + response);
-
-    // Check for successful response
-    if (httpCode > 0) {
-        if (httpCode >= 200 && httpCode < 400) { // Accept redirects as success too
-            debugPrintln("Platform connection test successful");
-            return true;
-        } else {
-            debugPrintln("API endpoint returned error code: " + String(httpCode));
-            return false;
-        }
+    debugPrint("Testing platform connection...");
+    
+    // Create a simple test payload
+    DynamicJsonDocument testDoc(256);
+    testDoc["test"] = true;
+    testDoc["timestamp"] = millis();
+    testDoc["device"] = _deviceName;
+    
+    JsonObject testData = testDoc.as<JsonObject>();
+    MicroSafariResponse response = sendSensorData(testData);
+    
+    if (response.success) {
+        _status = MICROSAFARI_PLATFORM_CONNECTED;
+        debugPrint("Platform connection test successful");
+        return true;
     } else {
-        debugPrintln("HTTP request failed with code: " + String(httpCode));
-        debugPrintln("Possible issues:");
-        debugPrintln("1. Server is redirecting but client can't follow");
-        debugPrintln("2. SSL/TLS configuration issue");
-        debugPrintln("3. Server refusing connection");
+        debugPrint("Platform connection test failed: " + response.errorMessage);
+        return false;
     }
-
-    debugPrintln("Platform connection test failed: Network error - check connection");
-    return false;
 }
 
-MicroSafariResponse MicroSafari::sendSensorData(float temperature, float humidity, float soilMoisture, float lightLevel) {
-    MicroSafariResponse response;
-
-    if (!_initialized) {
-        response.errorMessage = "Library not initialized";
-        debugPrintln("MicroSafari::sendSensorData() - ERROR: " + response.errorMessage);
+/**
+ * @brief Send sensor data with JsonObject
+ */
+MicroSafariResponse MicroSafari::sendSensorData(const JsonObject& sensorData) {
+    debugPrint("Preparing to send sensor data...");
+    
+    // Create the complete payload structure expected by /api/ingest
+    DynamicJsonDocument doc(1024);
+    doc["payload"] = sensorData;
+    
+    String jsonString;
+    serializeJson(doc, jsonString);
+    
+    debugPrint("JSON payload: " + jsonString);
+    
+    // Validate JSON structure before sending
+    if (!validateJsonPayload(jsonString)) {
+        MicroSafariResponse response;
+        response.success = false;
+        response.httpCode = 0;
+        response.errorMessage = "Invalid JSON payload structure";
         return response;
     }
+    
+    return performHttpRequest("/api/ingest", jsonString);
+}
+
+/**
+ * @brief Send raw JSON string data
+ */
+MicroSafariResponse MicroSafari::sendRawData(const String& jsonPayload) {
+    debugPrint("Preparing to send raw JSON data...");
+    debugPrint("Raw JSON payload: " + jsonPayload);
+    
+    // Validate JSON structure before sending
+    if (!validateJsonPayload(jsonPayload)) {
+        MicroSafariResponse response;
+        response.success = false;
+        response.httpCode = 0;
+        response.errorMessage = "Invalid JSON payload structure";
+        return response;
+    }
+    
+    return performHttpRequest("/api/ingest", jsonPayload);
+}
+
+/**
+ * @brief Send sensor data with individual parameters
+ */
+MicroSafariResponse MicroSafari::sendSensorData(float temperature, 
+                                                float humidity, 
+                                                float soilMoisture, 
+                                                float lightLevel) {
+    // Create JSON object with sensor readings
+    DynamicJsonDocument doc(512);
+    JsonObject sensorData = doc.to<JsonObject>();
+    
+    // Add mandatory readings
+    sensorData["temperature"] = temperature;
+    sensorData["humidity"] = humidity;
+    
+    // Add optional readings if provided (not -1)
+    if (soilMoisture != -1) {
+        sensorData["soil_moisture"] = soilMoisture;
+    }
+    
+    if (lightLevel != -1) {
+        sensorData["light_level"] = lightLevel;
+    }
+    
+    // Add timestamp and device info
+    sensorData["timestamp"] = millis();
+    sensorData["device_name"] = _deviceName;
+    
+    return sendSensorData(sensorData);
+}
+
+/**
+ * @brief Get current status
+ */
+MicroSafariStatus MicroSafari::getStatus() {
+    return _status;
+}
+
+/**
+ * @brief Get status as string
+ */
+String MicroSafari::getStatusString() {
+    switch (_status) {
+        case MICROSAFARI_DISCONNECTED:
+            return "Disconnected";
+        case MICROSAFARI_WIFI_CONNECTING:
+            return "WiFi Connecting";
+        case MICROSAFARI_WIFI_CONNECTED:
+            return "WiFi Connected";
+        case MICROSAFARI_PLATFORM_CONNECTED:
+            return "Platform Connected";
+        case MICROSAFARI_ERROR:
+            return "Error";
+        default:
+            return "Unknown";
+    }
+}
+
+/**
+ * @brief Get WiFi signal strength
+ */
+int MicroSafari::getWiFiSignalStrength() {
+    if (isWiFiConnected()) {
+        return WiFi.RSSI();
+    }
+    return -999; // Invalid signal strength
+}
+
+/**
+ * @brief Set debug mode
+ */
+void MicroSafari::setDebug(bool enable) {
+    _debug = enable;
+    debugPrint(enable ? "Debug mode enabled" : "Debug mode disabled");
+}
+
+/**
+ * @brief Set connection timeout
+ */
+void MicroSafari::setConnectionTimeout(unsigned long timeout) {
+    _connectionTimeout = timeout;
+    debugPrint("Connection timeout set to " + String(timeout) + "ms");
+}
+
+/**
+ * @brief Set HTTP retry configuration
+ */
+void MicroSafari::setRetryConfig(int maxRetries, unsigned long retryDelay) {
+    _maxRetries = maxRetries;
+    _retryDelay = retryDelay;
+    debugPrint("Retry config set: " + String(maxRetries) + " retries, " + String(retryDelay) + "ms delay");
+}
+
+/**
+ * @brief Set heartbeat interval
+ */
+void MicroSafari::setHeartbeatInterval(unsigned long interval) {
+    _heartbeatInterval = interval;
+    debugPrint("Heartbeat interval set to " + String(interval) + "ms");
+}
+
+/**
+ * @brief Force immediate heartbeat
+ */
+bool MicroSafari::forceHeartbeat() {
+    return sendHeartbeat();
+}
+
+/**
+ * @brief Get last heartbeat timestamp
+ */
+unsigned long MicroSafari::getLastHeartbeat() {
+    return _lastHeartbeat;
+}
+
+/**
+ * @brief Check if platform is actively connected
+ */
+bool MicroSafari::isPlatformActive() {
+    if (!isWiFiConnected()) {
+        return false;
+    }
+    
+    // Consider platform active if last heartbeat was within 2x the interval
+    return (millis() - _lastHeartbeat) < (_heartbeatInterval * 2);
+}
+
+/**
+ * @brief Handle connection failure
+ */
+void MicroSafari::handleConnectionFailure(const String& errorMessage) {
+    _consecutiveFailures++;
+    _lastErrorTime = millis();
+    _lastErrorMessage = errorMessage;
+    
+    debugPrint("Connection failure #" + String(_consecutiveFailures) + ": " + errorMessage);
+    
+    if (_consecutiveFailures >= _maxConsecutiveFailures) {
+        debugPrint("Maximum consecutive failures reached, resetting connection...");
+        resetConnectionState();
+    }
+}
+
+/**
+ * @brief Reset connection state
+ */
+void MicroSafari::resetConnectionState() {
+    debugPrint("Resetting connection state...");
+    
+    // Disconnect and reset WiFi
+    WiFi.disconnect();
+    delay(1000);
+    
+    // Reset internal state
+    _status = MICROSAFARI_DISCONNECTED;
+    _consecutiveFailures = 0;
+    _lastConnectionAttempt = 0;
+    
+    // Reinitialize WiFi
+    WiFi.mode(WIFI_STA);
+    WiFi.setHostname(_deviceName.c_str());
+    
+    debugPrint("Connection state reset complete");
+}
+
+/**
+ * @brief Get WiFi diagnostics
+ */
+String MicroSafari::getWiFiDiagnostics() {
+    String diagnostics = "WiFi Diagnostics:\n";
+    diagnostics += "Status: " + String(WiFi.status()) + "\n";
+    diagnostics += "SSID: " + WiFi.SSID() + "\n";
+    diagnostics += "RSSI: " + String(WiFi.RSSI()) + " dBm\n";
+    diagnostics += "IP: " + WiFi.localIP().toString() + "\n";
+    diagnostics += "Gateway: " + WiFi.gatewayIP().toString() + "\n";
+    diagnostics += "DNS: " + WiFi.dnsIP().toString() + "\n";
+    diagnostics += "MAC: " + WiFi.macAddress() + "\n";
+    return diagnostics;
+}
+
+/**
+ * @brief Enable/disable auto-reconnect
+ */
+void MicroSafari::setAutoReconnect(bool enable) {
+    _autoReconnect = enable;
+    debugPrint("Auto-reconnect " + String(enable ? "enabled" : "disabled"));
+}
+
+/**
+ * @brief Set max consecutive failures
+ */
+void MicroSafari::setMaxConsecutiveFailures(int maxFailures) {
+    _maxConsecutiveFailures = maxFailures;
+    debugPrint("Max consecutive failures set to " + String(maxFailures));
+}
+
+/**
+ * @brief Get connection diagnostics
+ */
+String MicroSafari::getConnectionDiagnostics() {
+    String diagnostics = "=== MicroSafari Connection Diagnostics ===\n";
+    diagnostics += "Status: " + getStatusString() + "\n";
+    diagnostics += "Platform Active: " + String(isPlatformActive() ? "Yes" : "No") + "\n";
+    diagnostics += "Consecutive Failures: " + String(_consecutiveFailures) + "/" + String(_maxConsecutiveFailures) + "\n";
+    diagnostics += "Last Heartbeat: " + String((millis() - _lastHeartbeat) / 1000) + "s ago\n";
+    diagnostics += "Auto-reconnect: " + String(_autoReconnect ? "Enabled" : "Disabled") + "\n";
+    diagnostics += "Free Heap: " + String(ESP.getFreeHeap()) + " bytes\n";
+    diagnostics += "Uptime: " + String(millis() / 1000) + "s\n";
+    
+    if (isWiFiConnected()) {
+        diagnostics += getWiFiDiagnostics();
+    }
+    
+    if (!_lastErrorMessage.isEmpty()) {
+        diagnostics += "\nLast Error: " + _lastErrorMessage + "\n";
+        diagnostics += "Error Time: " + String((millis() - _lastErrorTime) / 1000) + "s ago\n";
+    }
+    
+    return diagnostics;
+}
+
+/**
+ * @brief Get last error information
+ */
+String MicroSafari::getLastError() {
+    if (_lastErrorMessage.isEmpty()) {
+        return "No errors recorded";
+    }
+    
+    return "[" + String((millis() - _lastErrorTime) / 1000) + "s ago] " + _lastErrorMessage;
+}
+
+/**
+ * @brief Clear error history
+ */
+void MicroSafari::clearErrors() {
+    _consecutiveFailures = 0;
+    _lastErrorTime = 0;
+    _lastErrorMessage = "";
+    debugPrint("Error history cleared");
+}
+
+/**
+ * @brief Run comprehensive connectivity test
+ */
+bool MicroSafari::runConnectivityTest() {
+    debugPrint("Running comprehensive connectivity test...");
+    
+    // Test 1: WiFi connectivity
+    if (!isWiFiConnected()) {
+        debugPrint("Connectivity test failed: WiFi not connected");
+        return false;
+    }
+    debugPrint("✓ WiFi connectivity test passed");
+    
+    // Test 2: Internet connectivity (ping gateway)
+    IPAddress gateway = WiFi.gatewayIP();
+    if (gateway.toString() == "0.0.0.0") {
+        debugPrint("Connectivity test failed: No gateway available");
+        return false;
+    }
+    debugPrint("✓ Gateway connectivity test passed");
+    
+    // Test 3: Platform connectivity
+    if (!testConnection()) {
+        debugPrint("Connectivity test failed: Platform unreachable");
+        return false;
+    }
+    debugPrint("✓ Platform connectivity test passed");
+    
+    // Test 4: JSON validation
+    DynamicJsonDocument testDoc(256);
+    testDoc["payload"]["test"] = "connectivity";
+    String testJson;
+    serializeJson(testDoc, testJson);
+    
+    if (!validateJsonPayload(testJson)) {
+        debugPrint("Connectivity test failed: JSON validation error");
+        return false;
+    }
+    debugPrint("✓ JSON validation test passed");
+    
+    debugPrint("All connectivity tests passed!");
+    clearErrors(); // Clear any previous errors on successful test
+    return true;
+}
+
+/**
+ * @brief Get detailed status as JSON
+ */
+JsonObject MicroSafari::getDetailedStatus() {
+    DynamicJsonDocument doc(1024);
+    JsonObject status = doc.to<JsonObject>();
+    
+    status["status"] = getStatusString();
+    status["wifi_connected"] = isWiFiConnected();
+    status["platform_active"] = isPlatformActive();
+    status["signal_strength"] = getWiFiSignalStrength();
+    status["ip_address"] = getIPAddress();
+    status["mac_address"] = getMacAddress();
+    status["consecutive_failures"] = _consecutiveFailures;
+    status["max_failures"] = _maxConsecutiveFailures;
+    status["auto_reconnect"] = _autoReconnect;
+    status["last_heartbeat"] = _lastHeartbeat;
+    status["heartbeat_interval"] = _heartbeatInterval;
+    status["uptime_seconds"] = millis() / 1000;
+    status["free_heap"] = ESP.getFreeHeap();
+    
+    if (!_lastErrorMessage.isEmpty()) {
+        status["last_error"] = _lastErrorMessage;
+        status["error_time"] = _lastErrorTime;
+    }
+    
+    return status;
+}
+
+/**
+ * @brief Disconnect and cleanup
+ */
+void MicroSafari::disconnect() {
+    debugPrint("Disconnecting...");
+    _httpClient.end();
+    WiFi.disconnect();
+    _status = MICROSAFARI_DISCONNECTED;
+}
+
+/**
+ * @brief Main loop function
+ */
+void MicroSafari::loop() {
+    // Check WiFi connection status
+    if (!isWiFiConnected() && _status != MICROSAFARI_WIFI_CONNECTING) {
+        if (millis() - _lastConnectionAttempt > 30000) { // Retry every 30 seconds
+            debugPrint("WiFi disconnected, attempting reconnection...");
+            connectWiFi(_connectionTimeout);
+        }
+    }
+    
+    // Update status based on WiFi connection
+    if (isWiFiConnected() && _status == MICROSAFARI_WIFI_CONNECTING) {
+        _status = MICROSAFARI_WIFI_CONNECTED;
+    } else if (!isWiFiConnected() && _status != MICROSAFARI_WIFI_CONNECTING) {
+        _status = MICROSAFARI_DISCONNECTED;
+    }
+    
+    // Send heartbeat if needed and WiFi is connected
+    if (isWiFiConnected() && needsHeartbeat()) {
+        debugPrint("Heartbeat interval reached, sending heartbeat...");
+        if (!sendHeartbeat()) {
+            handleConnectionFailure("Heartbeat failed");
+        } else {
+            // Reset failure counter on successful heartbeat
+            if (_consecutiveFailures > 0) {
+                debugPrint("Heartbeat successful, resetting failure counter");
+                _consecutiveFailures = 0;
+            }
+        }
+    }
+    
+    // Handle auto-reconnection if enabled
+    if (_autoReconnect && !isWiFiConnected() && _status == MICROSAFARI_DISCONNECTED) {
+        if (millis() - _lastConnectionAttempt > (30000 + (_consecutiveFailures * 10000))) {
+            debugPrint("Auto-reconnect triggered (failure count: " + String(_consecutiveFailures) + ")");
+            connectWiFi(_connectionTimeout);
+        }
+    }
+}
+
+/**
+ * @brief Get MAC address
+ */
+String MicroSafari::getMacAddress() {
+    return WiFi.macAddress();
+}
+
+/**
+ * @brief Get IP address
+ */
+String MicroSafari::getIPAddress() {
+    if (isWiFiConnected()) {
+        return WiFi.localIP().toString();
+    }
+    return "0.0.0.0";
+}
+
+/**
+ * @brief Validate HTTP response
+ */
+bool MicroSafari::validateResponse(const MicroSafariResponse& response) {
+    return response.success && response.httpCode == 201;
+}
+
+/**
+ * @brief Perform HTTP request with retry logic
+ */
+MicroSafariResponse MicroSafari::performHttpRequest(const String& endpoint, 
+                                                   const String& payload, 
+                                                   const String& method) {
+    MicroSafariResponse response;
+    response.success = false;
+    response.httpCode = 0;
     
     if (!isWiFiConnected()) {
         response.errorMessage = "WiFi not connected";
-        debugPrintln("MicroSafari::sendSensorData() - ERROR: " + response.errorMessage);
+        debugPrint("Cannot perform HTTP request - WiFi not connected");
         return response;
     }
     
-    debugPrintln("MicroSafari::sendSensorData() - Preparing to send data...");
-
-    // Create JSON payload
-    String payload = createSensorDataPayload(temperature, humidity, soilMoisture, lightLevel);
-    debugPrintln("Payload: " + payload);
-
-    // Send HTTP POST request to correct endpoint
-    String endpoint = _platformURL + "/api/ingest";
-    debugPrintln("Sending to: " + endpoint);
-
-    // Create new HTTP client with optimized configuration for real-time performance
-    HTTPClient httpClient;
-    httpClient.begin(endpoint);
-    httpClient.addHeader("x-api-key", _apiKey);
-    httpClient.addHeader("Content-Type", "application/json");
-    httpClient.addHeader("User-Agent", "MicroSafari-ESP32/1.0.0");
-    httpClient.addHeader("Connection", "close");
-    httpClient.setTimeout(5000);  // Reduced from 15s to 5s for faster response
-    httpClient.setReuse(false);
-    httpClient.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-
-    // Reduced retry attempts for faster failure detection
-    const int maxAttempts = 2;  // Reduced from 3 to 2
-    for (int attempt = 1; attempt <= maxAttempts; attempt++) {
-        debugPrintln("HTTP attempt " + String(attempt) + "/" + String(maxAttempts));
-
-        int httpCode = httpClient.POST(payload);
-        String responseData = httpClient.getString();
-
-        debugPrintln("HTTP response code: " + String(httpCode));
-        debugPrintln("HTTP response data: " + responseData);
-
-        response.httpCode = httpCode;
-        response.responseData = responseData;
-
-        if (httpCode > 0) {
-            if (httpCode >= 200 && httpCode < 300) {
-                response.success = true;
-                debugPrintln("Data sent successfully!");
-                httpClient.end();
-                return response;
-            } else if (httpCode >= 300 && httpCode < 400) {
-                debugPrintln("Redirect response received: " + String(httpCode));
-                response.success = true;
-                httpClient.end();
-                return response;
-            } else {
-                response.success = false;
-                response.errorMessage = "HTTP " + String(httpCode) + ": " + responseData;
-                debugPrintln("Server error: " + response.errorMessage);
-                httpClient.end();
-                return response;
-            }
+    debugPrint("Performing HTTP " + method + " to: " + endpoint);
+    
+    int attempts = 0;
+    while (attempts < _maxRetries) {
+        attempts++;
+        debugPrint("HTTP attempt " + String(attempts) + "/" + String(_maxRetries));
+        
+        // Use appropriate client based on URL scheme
+        if (_platformUrl.startsWith("https://")) {
+            _wifiClientHttps.setInsecure(); // Skip certificate verification for now
+            _httpClient.begin(_wifiClientHttps, _platformUrl + endpoint);
         } else {
-            debugPrintln("Network error (code " + String(httpCode) + "), retrying in " + String(500 * attempt) + "ms...");
-            if (attempt < maxAttempts) {
-                delay(500 * attempt);  // Reduced retry delay from 1000ms to 500ms
-            }
+            _httpClient.begin(_wifiClientHttp, _platformUrl + endpoint);
+        }
+        _httpClient.addHeader("Content-Type", "application/json");
+        _httpClient.addHeader("X-API-Key", _apiKey);
+        _httpClient.addHeader("User-Agent", "MicroSafari-ESP32/1.0.0");
+        _httpClient.setTimeout(15000); // 15 second timeout
+        
+        // Send request based on method
+        if (method == "POST") {
+            response.httpCode = _httpClient.POST(payload);
+        } else if (method == "GET") {
+            response.httpCode = _httpClient.GET();
+        } else if (method == "PUT") {
+            response.httpCode = _httpClient.PUT(payload);
+        }
+        
+        response.payload = _httpClient.getString();
+        _httpClient.end();
+        
+        debugPrint("HTTP response code: " + String(response.httpCode));
+        debugPrint("HTTP response body: " + response.payload);
+        
+        // Check if request was successful
+        if (response.httpCode == 201 || response.httpCode == 200) {
+            response.success = true;
+            _lastHeartbeat = millis(); // Update heartbeat on successful communication
+            debugPrint("HTTP request successful!");
+            return response;
+        } else if (response.httpCode == 401) {
+            response.errorMessage = "Authentication failed - check API key";
+            debugPrint("Authentication failed - will not retry");
+            return response; // Don't retry auth failures
+        } else if (response.httpCode == 400) {
+            response.errorMessage = "Invalid data format";
+            debugPrint("Bad request - will not retry");
+            return response; // Don't retry client errors
+        }
+        
+        // For other errors, retry if we have attempts left
+        if (attempts < _maxRetries) {
+            debugPrint("Request failed, retrying in " + String(_retryDelay) + "ms...");
+            delay(_retryDelay);
         }
     }
-
-    httpClient.end();
-    response.success = false;
-    response.errorMessage = "Network error after " + String(maxAttempts) + " attempts";
-    debugPrintln("Failed to send data: " + response.errorMessage);
+    
+    // All retries exhausted
+    if (response.httpCode == 503) {
+        response.errorMessage = "Service unavailable - development mode";
+    } else if (response.httpCode <= 0) {
+        response.errorMessage = "Network error - check connection";
+    } else {
+        response.errorMessage = "Server error (HTTP " + String(response.httpCode) + ") - all retries exhausted";
+    }
+    
+    debugPrint("HTTP request failed after " + String(_maxRetries) + " attempts");
+    handleConnectionFailure(response.errorMessage);
     return response;
 }
 
-void MicroSafari::loop() {
-    // Check WiFi connection and attempt reconnection if needed
-    if (!isWiFiConnected()) {
-        static unsigned long lastReconnectAttempt = 0;
-        if (millis() - lastReconnectAttempt > 30000) { // Try every 30 seconds
-            debugPrintln("WiFi disconnected - attempting reconnection...");
-            connectWiFi();
-            lastReconnectAttempt = millis();
+/**
+ * @brief Validate JSON payload structure
+ */
+bool MicroSafari::validateJsonPayload(const String& jsonPayload) {
+    if (jsonPayload.isEmpty()) {
+        debugPrint("JSON validation failed: empty payload");
+        return false;
+    }
+    
+    // Basic JSON structure validation
+    DynamicJsonDocument testDoc(2048);
+    DeserializationError error = deserializeJson(testDoc, jsonPayload);
+    
+    if (error) {
+        debugPrint("JSON validation failed: " + String(error.c_str()));
+        return false;
+    }
+    
+    // Check for required payload structure
+    if (!testDoc.containsKey("payload")) {
+        debugPrint("JSON validation failed: missing 'payload' field");
+        return false;
+    }
+    
+    debugPrint("JSON validation successful");
+    return true;
+}
+
+/**
+ * @brief Check if heartbeat is needed
+ */
+bool MicroSafari::needsHeartbeat() {
+    return (millis() - _lastHeartbeat) > _heartbeatInterval;
+}
+
+/**
+ * @brief Send heartbeat to platform
+ */
+bool MicroSafari::sendHeartbeat() {
+    debugPrint("Sending heartbeat to platform...");
+    
+    // Create heartbeat payload
+    DynamicJsonDocument doc(512);
+    JsonObject heartbeatData = doc.to<JsonObject>();
+    
+    heartbeatData["heartbeat"] = true;
+    heartbeatData["timestamp"] = millis();
+    heartbeatData["device_name"] = _deviceName;
+    heartbeatData["signal_strength"] = getWiFiSignalStrength();
+    heartbeatData["free_heap"] = ESP.getFreeHeap();
+    heartbeatData["uptime"] = millis() / 1000; // Uptime in seconds
+    
+    // Wrap in payload structure
+    DynamicJsonDocument payloadDoc(1024);
+    payloadDoc["payload"] = heartbeatData;
+    
+    String jsonString;
+    serializeJson(payloadDoc, jsonString);
+    
+    MicroSafariResponse response = performHttpRequest("/api/ingest", jsonString);
+    
+    if (response.success) {
+        debugPrint("Heartbeat sent successfully");
+        return true;
+    } else {
+        debugPrint("Heartbeat failed: " + response.errorMessage);
+        return false;
+    }
+}
+
+/**
+ * @brief Send custom JSON data to MicroSafari platform
+ */
+MicroSafariResponse MicroSafari::sendCustomData(const String& jsonPayload) {
+    debugPrint("Sending custom JSON data...");
+    
+    // Validate basic JSON structure
+    if (!validateJsonPayload(jsonPayload)) {
+        MicroSafariResponse errorResponse;
+        errorResponse.success = false;
+        errorResponse.httpCode = 0;
+        errorResponse.errorMessage = "Invalid JSON payload structure";
+        return errorResponse;
+    }
+    
+    // If the payload is already wrapped, use it directly
+    // Otherwise, wrap it in the expected payload structure
+    String wrappedPayload;
+    
+    DynamicJsonDocument testDoc(1024);
+    DeserializationError testError = deserializeJson(testDoc, jsonPayload);
+    
+    if (testError == DeserializationError::Ok && testDoc.containsKey("payload")) {
+        // Already wrapped
+        wrappedPayload = jsonPayload;
+    } else {
+        // Need to wrap in payload structure
+        DynamicJsonDocument wrapperDoc(1024);
+        
+        // Parse the incoming JSON
+        DynamicJsonDocument payloadDoc(1024);
+        DeserializationError error = deserializeJson(payloadDoc, jsonPayload);
+        
+        if (error != DeserializationError::Ok) {
+            MicroSafariResponse errorResponse;
+            errorResponse.success = false;
+            errorResponse.httpCode = 0;
+            errorResponse.errorMessage = "Failed to parse JSON payload: " + String(error.c_str());
+            return errorResponse;
         }
+        
+        wrapperDoc["payload"] = payloadDoc.as<JsonObject>();
+        serializeJson(wrapperDoc, wrappedPayload);
     }
+    
+    return performHttpRequest("/api/ingest", wrappedPayload);
 }
 
-int MicroSafari::getWiFiRSSI() {
-    return WiFi.RSSI();
-}
-
-String MicroSafari::getLocalIP() {
-    return WiFi.localIP().toString();
-}
-
-void MicroSafari::debugPrint(const String& message) {
-    if (_debugEnabled) {
-        Serial.print("[MicroSafari] " + message);
+/**
+ * @brief Poll for pending device commands from the platform
+ */
+MicroSafariResponse MicroSafari::pollCommands() {
+    debugPrint("Polling for device commands...");
+    
+    // Create empty payload for GET-style request
+    String emptyPayload = "{}";
+    
+    // Use a different endpoint for command polling
+    // This assumes the platform has a command polling endpoint
+    MicroSafariResponse response = performHttpRequest("/api/commands/poll", emptyPayload, "GET");
+    
+    if (response.success) {
+        debugPrint("Command poll successful");
+        
+        // Try to parse the response to see if there are commands
+        DynamicJsonDocument doc(1024);
+        DeserializationError error = deserializeJson(doc, response.payload);
+        
+        if (error == DeserializationError::Ok) {
+            if (doc.containsKey("commands") && doc["commands"].is<JsonArray>()) {
+                JsonArray commands = doc["commands"];
+                debugPrint("Found " + String(commands.size()) + " pending commands");
+                
+                // Execute each command
+                for (JsonVariant command : commands) {
+                    if (command.containsKey("data_source") && command.containsKey("value")) {
+                        String dataSource = command["data_source"].as<String>();
+                        String value = command["value"].as<String>();
+                        int commandId = command["id"].as<int>();
+                        
+                        debugPrint("Executing command " + String(commandId) + ": " + dataSource + " = " + value);
+                        
+                        // Execute the command
+                        bool success = executeCommand(dataSource, value);
+                        
+                        // Send acknowledgment back to platform
+                        acknowledgeCommand(commandId, success);
+                    }
+                }
+            } else {
+                debugPrint("No pending commands found");
+            }
+        } else {
+            debugPrint("Failed to parse command response: " + String(error.c_str()));
+        }
+    } else {
+        debugPrint("Command poll failed: " + response.errorMessage);
     }
+    
+    return response;
 }
 
-void MicroSafari::debugPrintln(const String& message) {
-    if (_debugEnabled) {
-        Serial.println("[MicroSafari] " + message);
+/**
+ * @brief Execute a device command based on data source and value
+ */
+bool MicroSafari::executeCommand(const String& dataSource, const String& value) {
+    debugPrint("Executing command: " + dataSource + " = " + value);
+    
+    // Use callback function if set, otherwise use base implementation
+    if (_commandCallback != nullptr) {
+        return _commandCallback(dataSource, value);
     }
+    
+    // Base implementation - just log the command
+    Serial.print("[MicroSafari] Command received: ");
+    Serial.print(dataSource);
+    Serial.print(" = ");
+    Serial.println(value);
+    
+    // In a real implementation, this would:
+    // 1. Parse the dataSource to determine which actuator/output to control
+    // 2. Parse the value to determine the desired state
+    // 3. Execute the appropriate hardware control (digitalWrite, analogWrite, etc.)
+    // 4. Update internal state tracking
+    // 5. Optionally send confirmation back to platform
+    
+    return true; // Assume success for base implementation
 }
 
-String MicroSafari::createSensorDataPayload(float temperature, float humidity, float soilMoisture, float lightLevel) {
-    DynamicJsonDocument doc(1024);
+/**
+ * @brief Acknowledge command execution status to the platform
+ */
+bool MicroSafari::acknowledgeCommand(int commandId, bool success) {
+    debugPrint("Acknowledging command " + String(commandId) + " with status: " + (success ? "success" : "failure"));
+    
+    // Create acknowledgment payload
+    DynamicJsonDocument doc(512);
+    doc["command_id"] = commandId;
 
-    // Create the payload object to match API specification
-    JsonObject payload = doc.createNestedObject("payload");
+    // Send current timestamp in ISO format instead of millis()
+    // Note: ESP32 doesn't have real-time clock, so we'll send current time
+    // The backend will handle timestamp conversion if needed
+    doc["executed_at"] = ""; // Let backend set the timestamp
 
-    // Add sensor data directly to payload (matching your curl example)
-    payload["temperature"] = temperature;
-    payload["humidity"] = humidity;
-    payload["soil_moisture"] = soilMoisture;
-    payload["light_level"] = lightLevel;
-    payload["timestamp"] = millis();
-    payload["device_name"] = _deviceName;
-
+    // Add execution result
+    JsonObject result = doc.createNestedObject("result");
+    result["status"] = success ? "success" : "failure";
+    result["device_uptime"] = millis() / 1000; // Uptime in seconds
+    
     String jsonString;
     serializeJson(doc, jsonString);
-    return jsonString;
+    
+    // Send acknowledgment via POST to /api/commands/poll
+    MicroSafariResponse response = performHttpRequest("/api/commands/poll", jsonString, "POST");
+    
+    if (response.success) {
+        debugPrint("Command acknowledgment sent successfully");
+        return true;
+    } else {
+        debugPrint("Failed to send command acknowledgment: " + response.errorMessage);
+        return false;
+    }
+}
+
+/**
+ * @brief Set command callback function for handling device commands
+ */
+void MicroSafari::setCommandCallback(bool (*callback)(const String& dataSource, const String& value)) {
+    _commandCallback = callback;
+    debugPrint("Command callback function set");
 }
